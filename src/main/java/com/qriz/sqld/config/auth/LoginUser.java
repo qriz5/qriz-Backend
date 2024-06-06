@@ -46,7 +46,6 @@ public class LoginUser implements UserDetails, OAuth2User {
         return user.getUsername();
     }
 
-
     @Override
     public boolean isAccountNonExpired() {
         return true;
