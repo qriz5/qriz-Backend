@@ -2,22 +2,33 @@ package com.qriz.sqld.service.exam;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.qriz.sqld.domain.clip.ClipRepository;
 import com.qriz.sqld.domain.clip.Clipped;
+import com.qriz.sqld.domain.daily.UserDaily;
 import com.qriz.sqld.domain.exam.UserExamSession;
 import com.qriz.sqld.domain.exam.UserExamSessionRepository;
 import com.qriz.sqld.domain.question.Question;
 import com.qriz.sqld.domain.question.QuestionRepository;
+import com.qriz.sqld.domain.skill.Skill;
 import com.qriz.sqld.domain.user.User;
 import com.qriz.sqld.domain.user.UserRepository;
 import com.qriz.sqld.domain.userActivity.UserActivity;
 import com.qriz.sqld.domain.userActivity.UserActivityRepository;
+import com.qriz.sqld.dto.daily.DailyScoreDto;
+import com.qriz.sqld.dto.daily.ResultDetailDto;
+import com.qriz.sqld.dto.daily.WeeklyTestResultDto;
+import com.qriz.sqld.dto.exam.ExamResultListDto;
+import com.qriz.sqld.dto.exam.ExamScoreDto;
 import com.qriz.sqld.dto.exam.ExamTestResult;
 import com.qriz.sqld.dto.test.TestReqDto;
 import com.qriz.sqld.dto.test.TestRespDto;
@@ -34,6 +45,8 @@ public class ExamService {
     private final UserRepository userRepository;
     private final UserActivityRepository userActivityRepository;
     private final ClipRepository clipRepository;
+
+    private final Logger log = LoggerFactory.getLogger(ExamService.class);
 
     @Transactional(readOnly = true)
     public ExamTestResult getExamQuestionsBySession(Long userId, String session) {
@@ -171,5 +184,104 @@ public class ExamService {
             default:
                 return "알 수 없음";
         }
+    }
+
+    /**
+     * 오늘의 공부 결과 - 문제 상세보기
+     * 
+     * @param userId
+     * @param session
+     * @param questionId
+     * @return
+     */
+    @Transactional(readOnly = true)
+    public ResultDetailDto getExamResultDetail(Long userId, String session, Long questionId) {
+        log.info("Getting daily result detail for userId: {}, session: {}, questionId: {}", userId, session,
+                questionId);
+
+        String testInfo = session;
+        log.info("Constructed testInfo: {}", testInfo);
+
+        UserActivity userActivity = userActivityRepository
+                .findByUserIdAndTestInfoAndQuestionId(userId, testInfo, questionId)
+                .orElseThrow(() -> {
+                    log.error("UserActivity not found for userId: {}, testInfo: {}, questionId: {}", userId, testInfo,
+                            questionId);
+                    return new CustomApiException("해당 문제의 풀이 결과를 찾을 수 없습니다.");
+                });
+
+        log.info("UserActivity found: {}", userActivity);
+
+        Question question = userActivity.getQuestion();
+        Skill skill = question.getSkill();
+
+        ResultDetailDto result = ResultDetailDto.builder()
+                .skillName(skill.getKeyConcepts())
+                .question(question.getQuestion())
+                .option1(question.getOption1())
+                .option2(question.getOption2())
+                .option3(question.getOption3())
+                .option4(question.getOption4())
+                .answer(question.getAnswer())
+                .solution(question.getSolution())
+                .checked(userActivity.getChecked())
+                .correction(userActivity.isCorrection())
+                .build();
+
+        log.info("ExamResultDetailDto created: {}", result);
+
+        return result;
+    }
+
+    /**
+     * 특정 회차의 테스트 결과 점수
+     * 
+     * @param userId
+     * @param session
+     * @return
+     */
+    @Transactional(readOnly = true)
+    public ExamTestResult.Response getExamSubjectDetails(Long userId, String session) {
+        log.info("Starting getDaySubjectDetails for userId: {} and session: {}", userId, session);
+
+        UserExamSession userExamSession = userExamSessionRepository.findByUserIdAndSession(userId, session)
+                .orElseThrow(() -> new CustomApiException("해당 회차의 모의고사 세션을 찾을 수 없습니다."));
+
+        if (!userExamSession.isCompleted()) {
+            throw new CustomApiException("해당 회차의 모의고사가 완료되지 않았습니다.");
+        }
+
+        List<UserActivity> activities = userActivityRepository.findByUserIdAndTestInfoOrderByQuestionNumAsc(userId,
+                session);
+
+        if (activities.isEmpty()) {
+            throw new CustomApiException("해당 회차에 대한 활동 기록이 없습니다.");
+        }
+
+        Map<String, ExamTestResult.SubjectDetails> subjectDetailsMap = new HashMap<>();
+        List<ExamTestResult.ResultDto> subjectResultsList = new ArrayList<>();
+
+        for (UserActivity activity : activities) {
+            Question question = activity.getQuestion();
+            Skill skill = question.getSkill();
+
+            String subjectTitle = skill.getTitle(); // 직접 Skill의 title 사용
+            ExamTestResult.SubjectDetails subjectDetails = subjectDetailsMap.computeIfAbsent(subjectTitle,
+                    k -> new ExamTestResult.SubjectDetails(subjectTitle));
+
+            subjectDetails.addScore(skill.getKeyConcepts(), activity.getScore());
+
+            subjectResultsList.add(new ExamTestResult.ResultDto(
+                    skill.getKeyConcepts(),
+                    question.getQuestion(),
+                    activity.isCorrection()));
+        }
+
+        subjectDetailsMap.values().forEach(ExamTestResult.SubjectDetails::adjustTotalScore);
+
+        List<ExamTestResult.SubjectDetails> userExamInfoList = new ArrayList<>(subjectDetailsMap.values());
+
+        log.info("Completed processing for getDaySubjectDetails");
+        return new ExamTestResult.Response(session, userExamInfoList, subjectResultsList);
     }
 }
